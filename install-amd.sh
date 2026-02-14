@@ -157,6 +157,37 @@ ensure_zivpn_iptables_persist() {
 }
 
 # =========================
+# UNINSTALL / REINSTALL (ZIVPN)
+# =========================
+zivpn_uninstall() {
+  print_section "Menghapus instalasi ZIVPN lama (reinstall)"
+
+  run_with_spinner "Stop service zivpn" "systemctl stop zivpn.service 2>/dev/null || true"
+  run_with_spinner "Disable service zivpn" "systemctl disable zivpn.service 2>/dev/null || true"
+
+  run_with_spinner "Hapus file service" "rm -f /etc/systemd/system/zivpn.service"
+  run_with_spinner "Reload systemd" "systemctl daemon-reload"
+
+  run_with_spinner "Hapus binary zivpn" "rm -f /usr/local/bin/zivpn"
+  run_with_spinner "Hapus menu-zivpn" "rm -f /usr/local/bin/menu-zivpn"
+  run_with_spinner "Hapus folder config /etc/zivpn" "rm -rf /etc/zivpn"
+
+  local iface
+  iface=$(ip -4 route ls | awk '/default/ {print $5; exit}')
+  if [ -n "$iface" ]; then
+    while iptables -t nat -C PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null; do
+      iptables -t nat -D PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || break
+    done
+  fi
+
+  mkdir -p /etc/iptables
+  iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+
+  echo -e "${GREEN}ZIVPN lama berhasil dihapus.${RESET}"
+}
+
+# =========================
 # BACKUP / RESTORE
 # =========================
 ins_backup_tools() {
@@ -289,14 +320,16 @@ zivpn_restore_backup() {
 # =========================
 do_install() {
   print_section "Cek instalasi ZIVPN UDP sebelumnya"
-  if [ -f /usr/local/bin/zivpn ] || [ -f /etc/systemd/system/zivpn.service ]; then
-    echo -e "${YELLOW}ZIVPN UDP terdeteksi sudah terpasang.${RESET}"
-    echo -e "${YELLOW}Instalasi dihentikan agar tidak menimpa file yang ada.${RESET}"
-    exit 1
+  if [ -f /usr/local/bin/zivpn ] || [ -f /etc/systemd/system/zivpn.service ] || [ -d /etc/zivpn ]; then
+    echo -e "${YELLOW}ZIVPN terdeteksi sudah terpasang. Akan dilakukan reinstall (hapus lalu install ulang).${RESET}"
+    zivpn_uninstall
   fi
 
   print_section "Update sistem"
   run_with_spinner "Update & upgrade paket" "apt-get update && apt-get upgrade -y"
+
+  print_section "Install paket pendukung"
+  run_with_spinner "Install jq, curl, wget, zip, unzip" "apt-get install -y jq curl wget zip unzip ca-certificates"
 
   print_section "Download ZIVPN UDP"
   echo -e "${CYAN}Mengunduh binary ZIVPN...${RESET}"
@@ -345,7 +378,7 @@ EOF
   ensure_zivpn_iptables_persist
 
   print_section "Install panel menu"
-  run_with_spinner "Mengunduh menu panel (menu-zivpn)" "wget -q https://raw.githubusercontent.com/ChristopherAGT/zivpn-tunnel-udp/main/panel-udp-zivpn.sh -O /usr/local/bin/menu-zivpn && chmod +x /usr/local/bin/menu-zivpn"
+  run_with_spinner "Mengunduh menu panel (menu-zivpn)" "wget -q https://raw.githubusercontent.com/welwel11/project5/main/panel-udp-zivpn.sh -O /usr/local/bin/menu-zivpn && chmod +x /usr/local/bin/menu-zivpn"
 
   if [ "$AUTO_MENU_AFTER_REBOOT" = "1" ]; then
     setup_autorun_menu_once
@@ -375,6 +408,12 @@ case "$MODE" in
   install)
     do_install
     ;;
+  reinstall)
+    do_install
+    ;;
+  uninstall)
+    zivpn_uninstall
+    ;;
   tools-backup)
     ins_backup_tools
     ;;
@@ -392,7 +431,9 @@ case "$MODE" in
     ;;
   *)
     echo -e "${YELLOW}Cara pakai:${RESET}"
-    echo -e "  $0 install"
+    echo -e "  $0 install                   # install (auto reinstall jika sudah ada)"
+    echo -e "  $0 reinstall                 # reinstall paksa"
+    echo -e "  $0 uninstall                 # hapus ZIVPN saja"
     echo -e "  $0 tools-backup              # install rclone/tar/gzip"
     echo -e "  $0 backup                    # backup lokal ke $BACKUP_DIR"
     echo -e "  $0 upload <file> [remote]    # upload via rclone"
