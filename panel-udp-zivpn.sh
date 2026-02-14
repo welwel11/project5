@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================
-# ZIVPN - PANEL USER UDP (RCLONE ONLY BACKUP)
+# ZIVPN - PANEL USER UDP (RCLONE ZIP BACKUP)
 # ==============================
 
 CONFIG_FILE="/etc/zivpn/config.json"
@@ -29,177 +29,230 @@ mkdir -p /etc/zivpn
 [ ! -f "$USER_DB" ] && touch "$USER_DB"
 [ ! -f "$CONF_FILE" ] && echo 'AUTOCLEAN=OFF' > "$CONF_FILE"
 
-source "$CONF_FILE"
+source "$CONF_FILE" 2>/dev/null || true
 
 # ==============================
-# INSTALL RCLONE
+# INSTALL RCLONE + ZIP
 # ==============================
 install_rclone() {
-apt update -y >/dev/null 2>&1
-apt install -y rclone tar gzip >/dev/null 2>&1
-mkdir -p /root/.config/rclone
-echo -e "${GREEN}rclone berhasil diinstall${RESET}"
-echo -e "${YELLOW}Sekarang jalankan perintah: rclone config${RESET}"
-read -p "Enter..."
+  apt update -y >/dev/null 2>&1
+  apt install -y rclone zip >/dev/null 2>&1
+  mkdir -p /root/.config/rclone
+  echo -e "${GREEN}rclone + zip berhasil diinstall${RESET}"
+  echo -e "${YELLOW}Sekarang jalankan perintah: rclone config${RESET}"
+  read -p "Enter..."
 }
 
-check_rclone(){
-if [ ! -f "$RCLONE_CONF" ]; then
-echo -e "${RED}rclone belum dikonfigurasi!${RESET}"
-echo "Jalankan: rclone config"
-read -p "Enter..."
-return 1
-fi
-return 0
-}
+check_rclone() {
+  if ! command -v rclone >/dev/null 2>&1; then
+    echo -e "${RED}rclone belum terinstall!${RESET}"
+    echo "Pilih menu: Install rclone"
+    read -p "Enter..."
+    return 1
+  fi
 
-# ==============================
-# BACKUP KE CLOUD
-# ==============================
-backup_cloud(){
+  if [ ! -f "$RCLONE_CONF" ]; then
+    echo -e "${RED}rclone belum dikonfigurasi!${RESET}"
+    echo "Jalankan: rclone config"
+    read -p "Enter..."
+    return 1
+  fi
 
-check_rclone || return
-
-FILE="/tmp/zivpn-$(date +%Y%m%d-%H%M%S).tar.gz"
-
-tar -czf "$FILE" \
-/etc/zivpn/config.json \
-/etc/zivpn/users.db \
-/etc/zivpn/zivpn.crt \
-/etc/zivpn/zivpn.key \
-/etc/zivpn.conf 2>/dev/null
-
-echo -e "${CYAN}Upload ke cloud...${RESET}"
-rclone copy "$FILE" "$RCLONE_REMOTE_DEFAULT" --progress
-
-rm -f "$FILE"
-
-echo -e "${GREEN}Backup selesai${RESET}"
-read -p "Enter..."
+  return 0
 }
 
 # ==============================
-# RESTORE DARI CLOUD
+# BACKUP KE CLOUD (ZIP)
 # ==============================
-restore_cloud(){
+backup_cloud() {
+  check_rclone || return
 
-check_rclone || return
+  local TS FILE
+  TS="$(date +%Y%m%d-%H%M%S)"
+  FILE="/tmp/zivpn-${TS}.zip"
 
-mkdir -p /tmp/zrestore
+  # bikin ZIP dari root supaya path tetap benar saat restore
+  (cd / && zip -q -r "$FILE" \
+    etc/zivpn/config.json \
+    etc/zivpn/users.db \
+    etc/zivpn/zivpn.crt \
+    etc/zivpn/zivpn.key \
+    etc/zivpn.conf 2>/dev/null)
 
-echo -e "${CYAN}Daftar backup:${RESET}"
-rclone lsf "$RCLONE_REMOTE_DEFAULT" | nl
+  if [ ! -s "$FILE" ]; then
+    echo -e "${RED}Gagal membuat backup ZIP (file kosong).${RESET}"
+    read -p "Enter..."
+    return
+  fi
 
-echo
-read -p "Nama file backup: " fname
-[ -z "$fname" ] && return
+  echo -e "${CYAN}Upload ZIP ke cloud...${RESET}"
+  if rclone copy "$FILE" "$RCLONE_REMOTE_DEFAULT" --progress; then
+    rm -f "$FILE"
+    echo -e "${GREEN}Backup selesai: zivpn-${TS}.zip${RESET}"
+  else
+    echo -e "${RED}Upload gagal. File lokal disimpan: $FILE${RESET}"
+  fi
 
-rclone copyto "$RCLONE_REMOTE_DEFAULT/$fname" "/tmp/zrestore/$fname" --progress
+  read -p "Enter..."
+}
 
-systemctl stop zivpn.service 2>/dev/null
-tar -xzf "/tmp/zrestore/$fname" -C /
-systemctl restart zivpn.service 2>/dev/null
+# ==============================
+# RESTORE DARI CLOUD (ZIP)
+# ==============================
+restore_cloud() {
+  check_rclone || return
 
-rm -rf /tmp/zrestore
+  mkdir -p /tmp/zrestore
 
-echo -e "${GREEN}Restore selesai${RESET}"
-read -p "Enter..."
+  echo -e "${CYAN}Daftar backup (.zip):${RESET}"
+  rclone lsf "$RCLONE_REMOTE_DEFAULT" | grep -E '\.zip$' | nl
+  echo
+
+  read -p "Nama file backup (contoh: zivpn-YYYYmmdd-HHMMSS.zip): " fname
+  [ -z "$fname" ] && rm -rf /tmp/zrestore && return
+
+  echo -e "${CYAN}Download backup...${RESET}"
+  if ! rclone copyto "$RCLONE_REMOTE_DEFAULT/$fname" "/tmp/zrestore/$fname" --progress; then
+    echo -e "${RED}Download gagal. Pastikan nama file benar.${RESET}"
+    rm -rf /tmp/zrestore
+    read -p "Enter..."
+    return
+  fi
+
+  if [ ! -s "/tmp/zrestore/$fname" ]; then
+    echo -e "${RED}File hasil download kosong / tidak ada.${RESET}"
+    rm -rf /tmp/zrestore
+    read -p "Enter..."
+    return
+  fi
+
+  # backup cepat sebelum restore (rollback)
+  local BAK="/tmp/zivpn-before-restore-$(date +%Y%m%d-%H%M%S).zip"
+  (cd / && zip -q -r "$BAK" etc/zivpn etc/zivpn.conf 2>/dev/null) || true
+  echo -e "${YELLOW}Backup sebelum restore disimpan: $BAK${RESET}"
+
+  systemctl stop zivpn.service 2>/dev/null || true
+
+  echo -e "${CYAN}Extract ke sistem...${RESET}"
+  if ! unzip -o "/tmp/zrestore/$fname" -d / >/dev/null; then
+    echo -e "${RED}Extract gagal. Kamu bisa rollback pakai: $BAK${RESET}"
+    systemctl start zivpn.service 2>/dev/null || true
+    rm -rf /tmp/zrestore
+    read -p "Enter..."
+    return
+  fi
+
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl restart zivpn.service 2>/dev/null || true
+
+  rm -rf /tmp/zrestore
+  echo -e "${GREEN}Restore selesai${RESET}"
+  read -p "Enter..."
 }
 
 # ==============================
 # USER MANAGEMENT
 # ==============================
-add_user(){
-echo -e "${CYAN}Buat akun baru${RESET}"
+add_user() {
+  echo -e "${CYAN}Buat akun baru${RESET}"
 
-read -p "Password : " pass
-[[ -z "$pass" ]] && echo "Kosong!" && return
+  read -p "Password : " pass
+  [[ -z "$pass" ]] && echo "Kosong!" && read -p "Enter..." && return
 
-read -p "Masa aktif (hari): " days
-exp_date=$(date -d "+$days days" +%Y-%m-%d)
+  # cegah duplikat password
+  if jq -e --arg pw "$pass" '.auth.config | index($pw)' "$CONFIG_FILE" >/dev/null 2>&1; then
+    echo -e "${RED}Password sudah ada${RESET}"
+    read -p "Enter..."
+    return
+  fi
 
-jq --arg pw "$pass" '.auth.config += [$pw]' "$CONFIG_FILE" > temp && mv temp "$CONFIG_FILE"
-echo "$pass | $exp_date" >> "$USER_DB"
+  read -p "Masa aktif (hari): " days
+  [[ ! "$days" =~ ^[0-9]+$ ]] && echo -e "${RED}Hari harus angka${RESET}" && read -p "Enter..." && return
 
-systemctl restart zivpn.service
-echo -e "${GREEN}User aktif sampai $exp_date${RESET}"
-read -p "Enter..."
+  exp_date=$(date -d "+$days days" +%Y-%m-%d)
+
+  jq --arg pw "$pass" '.auth.config += [$pw]' "$CONFIG_FILE" > /tmp/zivpn.tmp && mv /tmp/zivpn.tmp "$CONFIG_FILE"
+  echo "$pass | $exp_date" >> "$USER_DB"
+
+  systemctl restart zivpn.service 2>/dev/null || true
+  echo -e "${GREEN}User aktif sampai $exp_date${RESET}"
+  read -p "Enter..."
 }
 
-list_users(){
-echo
-printf "%-4s %-20s %-12s %-10s\n" "ID" "PASSWORD" "EXPIRED" "STATUS"
+list_users() {
+  echo
+  printf "%-4s %-20s %-12s %-10s\n" "ID" "PASSWORD" "EXPIRED" "STATUS"
 
-i=1
-today=$(date +%Y-%m-%d)
+  i=1
+  today=$(date +%Y-%m-%d)
 
-while IFS='|' read -r pass exp; do
-pass=$(echo "$pass"|xargs)
-exp=$(echo "$exp"|xargs)
+  while IFS='|' read -r pass exp; do
+    pass=$(echo "$pass" | xargs)
+    exp=$(echo "$exp" | xargs)
+    [ -z "$pass" ] && continue
 
-[ -z "$pass" ] && continue
+    if [[ "$exp" < "$today" ]]; then
+      status="EXPIRED"
+    else
+      status="AKTIF"
+    fi
 
-if [[ "$exp" < "$today" ]]; then
-status="EXPIRED"
-else
-status="AKTIF"
-fi
-
-printf "%-4s %-20s %-12s %-10s\n" "$i" "$pass" "$exp" "$status"
-((i++))
-done < "$USER_DB"
-echo
+    printf "%-4s %-20s %-12s %-10s\n" "$i" "$pass" "$exp" "$status"
+    ((i++))
+  done < "$USER_DB"
+  echo
 }
 
-remove_user(){
-list_users
-read -p "ID: " id
-sel_pass=$(sed -n "${id}p" "$USER_DB"|cut -d'|' -f1|xargs)
-[ -z "$sel_pass" ] && echo "Salah" && return
+remove_user() {
+  list_users
+  read -p "ID: " id
+  [[ ! "$id" =~ ^[0-9]+$ ]] && echo -e "${RED}ID harus angka${RESET}" && sleep 1 && return
 
-jq --arg pw "$sel_pass" '.auth.config -= [$pw]' "$CONFIG_FILE" > temp && mv temp "$CONFIG_FILE"
-sed -i "/^$sel_pass/d" "$USER_DB"
+  sel_pass=$(sed -n "${id}p" "$USER_DB" | cut -d'|' -f1 | xargs)
+  [ -z "$sel_pass" ] && echo -e "${RED}ID tidak valid${RESET}" && sleep 1 && return
 
-systemctl restart zivpn.service
-echo "User dihapus"
-sleep 1
+  jq --arg pw "$sel_pass" '.auth.config -= [$pw]' "$CONFIG_FILE" > /tmp/zivpn.tmp && mv /tmp/zivpn.tmp "$CONFIG_FILE"
+  sed -i "/^$sel_pass[[:space:]]*|/d" "$USER_DB"
+
+  systemctl restart zivpn.service 2>/dev/null || true
+  echo -e "${GREEN}User dihapus${RESET}"
+  sleep 1
 }
 
 # ==============================
 # MENU
 # ==============================
 while true; do
+  clear
+  IP=$(curl -s ifconfig.me 2>/dev/null)
 
-clear
-IP=$(curl -s ifconfig.me)
+  echo "==============================="
+  echo "        PANEL ZIVPN UDP"
+  echo "==============================="
+  echo "IP VPS : ${IP:-N/A}"
+  echo "Port   : 5667"
+  echo "Range  : 6000-19999"
+  echo "Cloud  : $RCLONE_REMOTE_DEFAULT"
+  echo "==============================="
+  echo "1. Tambah User"
+  echo "2. Hapus User"
+  echo "3. List User"
+  echo "4. Install rclone + zip"
+  echo "5. Backup ke Cloud (ZIP)"
+  echo "6. Restore dari Cloud (ZIP)"
+  echo "0. Keluar"
+  echo "==============================="
 
-echo "==============================="
-echo "        PANEL ZIVPN UDP"
-echo "==============================="
-echo "IP VPS : $IP"
-echo "Port   : 5667"
-echo "Range  : 6000-19999"
-echo "Cloud  : $RCLONE_REMOTE_DEFAULT"
-echo "==============================="
-echo "1. Tambah User"
-echo "2. Hapus User"
-echo "3. List User"
-echo "4. Install rclone"
-echo "5. Backup ke Cloud"
-echo "6. Restore dari Cloud"
-echo "0. Keluar"
-echo "==============================="
+  read -p "Pilih: " menu
 
-read -p "Pilih: " menu
-
-case $menu in
-1) add_user;;
-2) remove_user;;
-3) list_users; read;;
-4) install_rclone;;
-5) backup_cloud;;
-6) restore_cloud;;
-0) exit;;
-esac
-
+  case $menu in
+    1) add_user;;
+    2) remove_user;;
+    3) list_users; read -p "Enter...";;
+    4) install_rclone;;
+    5) backup_cloud;;
+    6) restore_cloud;;
+    0) exit;;
+    *) echo "Pilihan salah"; sleep 1;;
+  esac
 done
