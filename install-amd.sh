@@ -13,7 +13,6 @@ RESET="\033[0m"
 # =========================
 BACKUP_DIR="/root/zivpn-backup"
 RCLONE_CONF="/root/.config/rclone/rclone.conf"
-# Ubah sesuai remote rclone kamu: gdrive:, dropbox:, s3:, dll
 RCLONE_REMOTE_DEFAULT="gdrive:zivpn-backup"
 
 # =========================
@@ -22,7 +21,6 @@ RCLONE_REMOTE_DEFAULT="gdrive:zivpn-backup"
 AUTO_MENU_AFTER_REBOOT=1     # 1=aktif, 0=nonaktif
 AUTO_REBOOT_AFTER_INSTALL=1  # 1=reboot otomatis, 0=tidak
 
-# Cetak judul section
 print_section() {
   local title="$1"
   echo -e "${MAGENTA}============================================================${RESET}"
@@ -30,7 +28,6 @@ print_section() {
   echo -e "${MAGENTA}============================================================${RESET}"
 }
 
-# Spinner + error handler
 run_with_spinner() {
   local msg="$1"
   local cmd="$2"
@@ -71,44 +68,42 @@ need_root() {
 }
 
 # =========================
-# AUTO RUN menu-zivpn SETELAH REBOOT (SEKALI)
+# AUTO RUN menu-zivpn SETIAP LOGIN ROOT
 # =========================
-setup_autorun_menu_once() {
-  print_section "Menyiapkan auto buka menu setelah reboot (sekali)"
+setup_autorun_menu_always() {
+  print_section "Menyiapkan auto buka menu setiap login root"
 
-  local FLAG="/root/.zivpn_first_login"
   local BASHRC="/root/.bashrc"
-
-  touch "$FLAG"
-  chmod 600 "$FLAG" 2>/dev/null || true
-
   [ -f "$BASHRC" ] && cp -a "$BASHRC" "/root/.bashrc.bak" 2>/dev/null || true
 
-  if grep -q "AUTO RUN MENU ZIVPN (ONCE)" "$BASHRC" 2>/dev/null; then
-    echo -e "${YELLOW}Konfigurasi autorun sudah ada. Lewati.${RESET}"
-    return 0
-  fi
+  # bersihkan blok lama agar tidak dobel
+  sed -i '/# ===== AUTO RUN MENU ZIVPN (ALWAYS) =====/,/# =======================================/d' "$BASHRC" 2>/dev/null || true
+  sed -i '/# ===== AUTO RUN MENU ZIVPN (ONCE) =====/,/# =====================================/d' "$BASHRC" 2>/dev/null || true
 
   cat <<'EOF' >> /root/.bashrc
 
-# ===== AUTO RUN MENU ZIVPN (ONCE) =====
-# Jalan sekali setelah reboot pada login root via shell interaktif
-if [ -f /root/.zivpn_first_login ] && [ -n "$PS1" ]; then
-  clear
-  echo "Memuat Panel ZIVPN..."
-  sleep 2
-  rm -f /root/.zivpn_first_login
+# ===== AUTO RUN MENU ZIVPN (ALWAYS) =====
+# Jalan setiap login root pada shell interaktif (SSH/console)
+if [ -n "$PS1" ]; then
   if command -v menu-zivpn >/dev/null 2>&1; then
+    clear
+    echo "Memuat Panel ZIVPN..."
+    sleep 1
     menu-zivpn
-  else
-    echo "menu-zivpn belum ada. Jalankan manual setelah tersedia."
   fi
 fi
-# =====================================
+# =======================================
 
 EOF
 
-  echo -e "${GREEN}Berhasil. Setelah reboot dan login, menu akan terbuka otomatis (sekali).${RESET}"
+  echo -e "${GREEN}Berhasil. Setiap login root, menu-zivpn akan terbuka otomatis.${RESET}"
+}
+
+disable_autorun_menu() {
+  print_section "Mematikan auto menu-zivpn"
+  sed -i '/# ===== AUTO RUN MENU ZIVPN (ALWAYS) =====/,/# =======================================/d' /root/.bashrc 2>/dev/null || true
+  sed -i '/# ===== AUTO RUN MENU ZIVPN (ONCE) =====/,/# =====================================/d' /root/.bashrc 2>/dev/null || true
+  echo -e "${GREEN}Auto menu-zivpn dimatikan.${RESET}"
 }
 
 # =========================
@@ -160,7 +155,7 @@ ensure_zivpn_iptables_persist() {
 # UNINSTALL / REINSTALL (ZIVPN)
 # =========================
 zivpn_uninstall() {
-  print_section "Menghapus instalasi ZIVPN lama (reinstall)"
+  print_section "Menghapus instalasi ZIVPN lama"
 
   run_with_spinner "Stop service zivpn" "systemctl stop zivpn.service 2>/dev/null || true"
   run_with_spinner "Disable service zivpn" "systemctl disable zivpn.service 2>/dev/null || true"
@@ -184,7 +179,7 @@ zivpn_uninstall() {
   iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
   ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
 
-  echo -e "${GREEN}ZIVPN lama berhasil dihapus.${RESET}"
+  echo -e "${GREEN}ZIVPN berhasil dihapus.${RESET}"
 }
 
 # =========================
@@ -326,10 +321,10 @@ do_install() {
   fi
 
   print_section "Update sistem"
-  run_with_spinner "Update & upgrade paket" "apt-get update && apt-get upgrade -y"
+  run_with_spinner "Update & upgrade paket" "apt-get update -y && apt-get upgrade -y"
 
   print_section "Install paket pendukung"
-  run_with_spinner "Install jq, curl, wget, zip, unzip" "apt-get install -y jq curl wget zip unzip ca-certificates"
+  run_with_spinner "Install jq, curl, wget, zip, unzip" "apt-get install -y jq curl wget zip unzip ca-certificates openssl"
 
   print_section "Download ZIVPN UDP"
   echo -e "${CYAN}Mengunduh binary ZIVPN...${RESET}"
@@ -381,13 +376,13 @@ EOF
   run_with_spinner "Mengunduh menu panel (menu-zivpn)" "wget -q https://raw.githubusercontent.com/welwel11/project5/main/panel-udp-zivpn.sh -O /usr/local/bin/menu-zivpn && chmod +x /usr/local/bin/menu-zivpn"
 
   if [ "$AUTO_MENU_AFTER_REBOOT" = "1" ]; then
-    setup_autorun_menu_once
+    setup_autorun_menu_always
   fi
 
   print_section "Selesai"
   rm -f install-amd.sh install-amd.tmp install-amd.log &>/dev/null || true
   echo -e "${GREEN}ZIVPN UDP berhasil diinstall.${RESET}"
-  echo -e "${GREEN}Setelah login, jalankan ${CYAN}menu-zivpn${GREEN} untuk membuka panel.${RESET}"
+  echo -e "${GREEN}Saat login root berikutnya, menu-zivpn akan terbuka otomatis.${RESET}"
 
   if [ "$AUTO_REBOOT_AFTER_INSTALL" = "1" ]; then
     echo -e "${YELLOW}Server akan reboot dalam 5 detik...${RESET}"
@@ -429,6 +424,12 @@ case "$MODE" in
   fix-iptables)
     ensure_zivpn_iptables_persist
     ;;
+  enable-autorun)
+    setup_autorun_menu_always
+    ;;
+  disable-autorun)
+    disable_autorun_menu
+    ;;
   *)
     echo -e "${YELLOW}Cara pakai:${RESET}"
     echo -e "  $0 install                   # install (auto reinstall jika sudah ada)"
@@ -439,6 +440,8 @@ case "$MODE" in
     echo -e "  $0 upload <file> [remote]    # upload via rclone"
     echo -e "  $0 restore <file>            # restore dari backup tar.gz"
     echo -e "  $0 fix-iptables              # terapkan + simpan iptables persistent"
+    echo -e "  $0 enable-autorun            # aktifkan auto buka menu saat login root"
+    echo -e "  $0 disable-autorun           # matikan auto buka menu saat login root"
     exit 1
     ;;
 esac
