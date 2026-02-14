@@ -15,6 +15,9 @@ BACKUP_DIR="/root/zivpn-backup"
 RCLONE_CONF="/root/.config/rclone/rclone.conf"
 RCLONE_REMOTE_DEFAULT="gdrive:zivpn-backup"
 
+# rclone.conf dari GitHub (RAW)
+RCLONE_CONF_URL="https://raw.githubusercontent.com/welwel11/project5/main/rclone.conf"
+
 # =========================
 # KONFIG AUTO MENU
 # =========================
@@ -68,6 +71,64 @@ need_root() {
 }
 
 # =========================
+# RCLONE CONF DARI GITHUB
+# =========================
+setup_rclone_from_github() {
+  print_section "Menyiapkan rclone.conf dari GitHub"
+
+  if ! command -v rclone >/dev/null 2>&1; then
+    run_with_spinner "Install rclone" "apt-get update -y && apt-get install -y rclone"
+  fi
+
+  mkdir -p "$(dirname "$RCLONE_CONF")"
+
+  if [ -f "$RCLONE_CONF" ]; then
+    echo -e "${YELLOW}rclone.conf sudah ada di $RCLONE_CONF (tidak ditimpa).${RESET}"
+    echo -e "${YELLOW}Jika mau timpa paksa: jalankan -> $0 setup-rclone-force${RESET}"
+    return 0
+  fi
+
+  run_with_spinner "Download rclone.conf" "wget -q '$RCLONE_CONF_URL' -O '$RCLONE_CONF'"
+  chmod 600 "$RCLONE_CONF" 2>/dev/null || true
+
+  echo -e "${GREEN}rclone.conf tersimpan: $RCLONE_CONF${RESET}"
+  echo -e "${CYAN}Remote terdeteksi:${RESET}"
+  rclone listremotes 2>/dev/null || true
+}
+
+setup_rclone_from_github_force() {
+  print_section "Menyiapkan rclone.conf dari GitHub (paksa timpa)"
+
+  if ! command -v rclone >/dev/null 2>&1; then
+    run_with_spinner "Install rclone" "apt-get update -y && apt-get install -y rclone"
+  fi
+
+  mkdir -p "$(dirname "$RCLONE_CONF")"
+  [ -f "$RCLONE_CONF" ] && cp -a "$RCLONE_CONF" "${RCLONE_CONF}.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+
+  run_with_spinner "Download rclone.conf" "wget -q '$RCLONE_CONF_URL' -O '$RCLONE_CONF'"
+  chmod 600 "$RCLONE_CONF" 2>/dev/null || true
+
+  echo -e "${GREEN}rclone.conf siap: $RCLONE_CONF${RESET}"
+  echo -e "${CYAN}Remote terdeteksi:${RESET}"
+  rclone listremotes 2>/dev/null || true
+}
+
+check_rclone_ready() {
+  if ! command -v rclone >/dev/null 2>&1; then
+    echo -e "${RED}rclone belum terinstall.${RESET}"
+    echo -e "${YELLOW}Jalankan:${RESET} $0 tools-backup"
+    return 1
+  fi
+  if [ ! -f "$RCLONE_CONF" ]; then
+    echo -e "${RED}rclone.conf belum ada di:${RESET} $RCLONE_CONF"
+    echo -e "${YELLOW}Jalankan:${RESET} $0 setup-rclone"
+    return 1
+  fi
+  return 0
+}
+
+# =========================
 # AUTO RUN menu-zivpn SETIAP LOGIN ROOT
 # =========================
 setup_autorun_menu_always() {
@@ -76,7 +137,6 @@ setup_autorun_menu_always() {
   local BASHRC="/root/.bashrc"
   [ -f "$BASHRC" ] && cp -a "$BASHRC" "/root/.bashrc.bak" 2>/dev/null || true
 
-  # bersihkan blok lama agar tidak dobel
   sed -i '/# ===== AUTO RUN MENU ZIVPN (ALWAYS) =====/,/# =======================================/d' "$BASHRC" 2>/dev/null || true
   sed -i '/# ===== AUTO RUN MENU ZIVPN (ONCE) =====/,/# =====================================/d' "$BASHRC" 2>/dev/null || true
 
@@ -127,7 +187,6 @@ ensure_zivpn_iptables_persist() {
 
   echo -e "${CYAN}Membersihkan rule lama (DNAT/REDIRECT) agar tidak dobel...${RESET}"
 
-  # Hapus rule DNAT lama (kalau ada) - dengan / tanpa -i iface
   while iptables -t nat -C PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null; do
     iptables -t nat -D PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null || break
   done
@@ -135,7 +194,6 @@ ensure_zivpn_iptables_persist() {
     iptables -t nat -D PREROUTING -i "$iface" -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null || break
   done
 
-  # Hapus rule REDIRECT lama (kalau ada) - dengan / tanpa -i iface
   while iptables -t nat -C PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT} 2>/dev/null; do
     iptables -t nat -D PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT} 2>/dev/null || break
   done
@@ -147,9 +205,7 @@ ensure_zivpn_iptables_persist() {
   iptables -t nat -A PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT}
 
   echo -e "${CYAN}Memastikan INPUT mengizinkan UDP ${ZIVPN_PORT}...${RESET}"
-  if iptables -C INPUT -p udp --dport ${ZIVPN_PORT} -j ACCEPT 2>/dev/null; then
-    echo -e "${YELLOW}Rule INPUT sudah ada. Lewati.${RESET}"
-  else
+  if ! iptables -C INPUT -p udp --dport ${ZIVPN_PORT} -j ACCEPT 2>/dev/null; then
     iptables -A INPUT -p udp --dport ${ZIVPN_PORT} -j ACCEPT
   fi
 
@@ -190,7 +246,6 @@ zivpn_uninstall() {
   run_with_spinner "Hapus menu-zivpn" "rm -f /usr/local/bin/menu-zivpn"
   run_with_spinner "Hapus folder config /etc/zivpn" "rm -rf /etc/zivpn"
 
-  # Bersihkan rule NAT ZIVPN (DNAT/REDIRECT) + INPUT accept agar tidak nyangkut
   local ZIVPN_PORT="5667"
   local PORT_FROM="6000"
   local PORT_TO="19999"
@@ -220,7 +275,7 @@ ins_backup_tools() {
   run_with_spinner "Install rclone, tar, gzip" "apt-get update -y && apt-get install -y rclone tar gzip"
   mkdir -p "$(dirname "$RCLONE_CONF")" "$BACKUP_DIR"
   echo -e "${GREEN}Tools backup siap.${RESET}"
-  echo -e "${YELLOW}Catatan:${RESET} Jalankan: ${CYAN}rclone config${RESET} (sekali saja) untuk set remote."
+  echo -e "${YELLOW}Catatan:${RESET} Jalankan: ${CYAN}$0 setup-rclone${RESET} untuk ambil rclone.conf dari GitHub."
 }
 
 zivpn_make_backup() {
@@ -242,9 +297,6 @@ zivpn_make_backup() {
   echo -e "${CYAN}Menyimpan rule firewall...${RESET}"
   iptables-save > "$tmp/iptables.rules" 2>/dev/null || true
   ip6tables-save > "$tmp/ip6tables.rules" 2>/dev/null || true
-  if command -v ufw >/dev/null 2>&1; then
-    ufw status verbose > "$tmp/ufw.status" 2>/dev/null || true
-  fi
 
   echo -e "${CYAN}Menyimpan info sistem...${RESET}"
   {
@@ -266,20 +318,34 @@ zivpn_upload_backup_rclone() {
   local remote="${2:-$RCLONE_REMOTE_DEFAULT}"
 
   print_section "Upload backup (rclone)"
+  check_rclone_ready || exit 1
+
   if [ -z "$file" ] || [ ! -f "$file" ]; then
     echo -e "${RED}File backup tidak ditemukan.${RESET}"
     echo -e "${YELLOW}Pakai:${RESET} $0 upload /root/zivpn-backup/zivpn-backup-XXXX.tar.gz [remote:folder]"
     exit 1
   fi
 
-  if [ ! -f "$RCLONE_CONF" ]; then
-    echo -e "${RED}rclone.conf belum ada di:${RESET} $RCLONE_CONF"
-    echo -e "${YELLOW}Jalankan:${RESET} ${CYAN}rclone config${RESET} untuk buat remote."
+  run_with_spinner "Upload ke $remote" "rclone copy '$file' '$remote' --progress"
+  echo -e "${GREEN}Upload selesai.${RESET}"
+}
+
+zivpn_download_backup_rclone() {
+  local remote_file="$1"   # contoh: gdrive:zivpn-backup/zivpn-backup-XXXX.tar.gz
+  local out_dir="${2:-$BACKUP_DIR}"
+
+  print_section "Download backup (rclone)"
+  check_rclone_ready || exit 1
+
+  if [ -z "$remote_file" ]; then
+    echo -e "${RED}Remote file belum diisi.${RESET}"
+    echo -e "${YELLOW}Contoh:${RESET} $0 download gdrive:zivpn-backup/zivpn-backup-XXXX.tar.gz"
     exit 1
   fi
 
-  run_with_spinner "Upload ke $remote" "rclone copy '$file' '$remote' --progress"
-  echo -e "${GREEN}Upload selesai.${RESET}"
+  mkdir -p "$out_dir"
+  run_with_spinner "Download dari $remote_file" "rclone copy '$remote_file' '$out_dir' --progress"
+  echo -e "${GREEN}Download selesai di: $out_dir${RESET}"
 }
 
 zivpn_restore_backup() {
@@ -356,6 +422,9 @@ do_install() {
   print_section "Install paket pendukung"
   run_with_spinner "Install jq, curl, wget, zip, unzip" "apt-get install -y jq curl wget zip unzip ca-certificates openssl"
 
+  # (Opsional) langsung setup rclone.conf dari GitHub
+  setup_rclone_from_github || true
+
   print_section "Download ZIVPN UDP"
   echo -e "${CYAN}Mengunduh binary ZIVPN...${RESET}"
   systemctl stop zivpn.service &>/dev/null || true
@@ -430,28 +499,34 @@ need_root
 
 MODE="${1:-install}"
 case "$MODE" in
-  install)         do_install ;;
-  reinstall)       do_install ;;
-  uninstall)       zivpn_uninstall ;;
-  tools-backup)    ins_backup_tools ;;
-  backup)          zivpn_make_backup >/dev/null ;;
-  upload)          zivpn_upload_backup_rclone "$2" "$3" ;;
-  restore)         zivpn_restore_backup "$2" ;;
-  fix-iptables)    ensure_zivpn_iptables_persist ;;
-  enable-autorun)  setup_autorun_menu_always ;;
-  disable-autorun) disable_autorun_menu ;;
+  install)              do_install ;;
+  reinstall)            do_install ;;
+  uninstall)            zivpn_uninstall ;;
+  tools-backup)         ins_backup_tools ;;
+  setup-rclone)         setup_rclone_from_github ;;
+  setup-rclone-force)   setup_rclone_from_github_force ;;
+  backup)               zivpn_make_backup >/dev/null ;;
+  upload)               zivpn_upload_backup_rclone "$2" "$3" ;;
+  download)             zivpn_download_backup_rclone "$2" "$3" ;;
+  restore)              zivpn_restore_backup "$2" ;;
+  fix-iptables)         ensure_zivpn_iptables_persist ;;
+  enable-autorun)       setup_autorun_menu_always ;;
+  disable-autorun)      disable_autorun_menu ;;
   *)
     echo -e "${YELLOW}Cara pakai:${RESET}"
-    echo -e "  $0 install                   # install (auto reinstall jika sudah ada)"
-    echo -e "  $0 reinstall                 # reinstall paksa"
-    echo -e "  $0 uninstall                 # hapus ZIVPN saja"
-    echo -e "  $0 tools-backup              # install rclone/tar/gzip"
-    echo -e "  $0 backup                    # backup lokal ke $BACKUP_DIR"
-    echo -e "  $0 upload <file> [remote]    # upload via rclone"
-    echo -e "  $0 restore <file>            # restore dari backup tar.gz"
-    echo -e "  $0 fix-iptables              # terapkan + simpan iptables persistent"
-    echo -e "  $0 enable-autorun            # aktifkan auto buka menu saat login root"
-    echo -e "  $0 disable-autorun           # matikan auto buka menu saat login root"
+    echo -e "  $0 install                     # install (auto reinstall jika sudah ada)"
+    echo -e "  $0 reinstall                   # reinstall paksa"
+    echo -e "  $0 uninstall                   # hapus ZIVPN saja"
+    echo -e "  $0 tools-backup                # install rclone/tar/gzip"
+    echo -e "  $0 setup-rclone                # download rclone.conf dari GitHub (tidak timpa jika sudah ada)"
+    echo -e "  $0 setup-rclone-force          # download rclone.conf dari GitHub (paksa timpa)"
+    echo -e "  $0 backup                      # backup lokal ke $BACKUP_DIR"
+    echo -e "  $0 upload <file> [remote]      # upload via rclone"
+    echo -e "  $0 download <remote_file>      # download backup dari remote rclone ke $BACKUP_DIR"
+    echo -e "  $0 restore <file>              # restore dari backup tar.gz"
+    echo -e "  $0 fix-iptables                # terapkan + simpan iptables persistent"
+    echo -e "  $0 enable-autorun              # aktifkan auto buka menu saat login root"
+    echo -e "  $0 disable-autorun             # matikan auto buka menu saat login root"
     exit 1
     ;;
 esac
