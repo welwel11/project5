@@ -306,7 +306,7 @@ do_install() {
 
   echo -e "${CYAN}Menyiapkan konfigurasi...${RESET}"
   mkdir -p /etc/zivpn
-  wget -q https://raw.githubusercontent.com/ChristopherAGT/zivpn-tunnel-udp/main/config.json -O /etc/zivpn/config.json
+  wget -q https://raw.githubusercontent.com/welwel11/project5/main/config.json -O /etc/zivpn/config.json
 
   print_section "Membuat sertifikat SSL"
   run_with_spinner "Membuat sertifikat SSL" "openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj '/C=US/ST=California/L=Los Angeles/O=Example Corp/OU=IT Department/CN=zivpn' -keyout /etc/zivpn/zivpn.key -out /etc/zivpn/zivpn.crt"
