@@ -1,13 +1,5 @@
 #!/bin/bash
 
-# ============================================================
-# ZIVPN UDP INSTALLER + BACKUP/RESTORE + FIX IPTABLES
-# Author: Zahid Islam
-# Remaster: ChristopherAGT
-# Fitur: Install / Backup / Restore / Upload / Fix iptables
-# Auto buka menu-zivpn setelah reboot (sekali)
-# ============================================================
-
 # Warna
 GREEN="\033[1;32m"
 YELLOW="\033[1;33m"
