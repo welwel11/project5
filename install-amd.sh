@@ -107,33 +107,56 @@ disable_autorun_menu() {
 }
 
 # =========================
-# FIX IPTABLES PERSISTENT (ZIVPN)
+# FIX IPTABLES PERSISTENT (ZIVPN) - DIPERBAIKI
 # =========================
 ensure_zivpn_iptables_persist() {
-  print_section "Menerapkan iptables dan menyimpannya (persistent)"
+  print_section "Menerapkan iptables untuk ZIVPN (lebih stabil) dan menyimpannya"
 
-  echo -e "${CYAN}Mendeteksi interface jaringan...${RESET}"
+  local ZIVPN_PORT="5667"
+  local PORT_FROM="6000"
+  local PORT_TO="19999"
+
+  echo -e "${CYAN}Mendeteksi interface default...${RESET}"
   local iface
   iface=$(ip -4 route ls | awk '/default/ {print $5; exit}')
-
   if [[ -z "$iface" ]]; then
-    echo -e "${RED}Gagal mendeteksi interface jaringan. Dibatalkan.${RESET}"
+    echo -e "${RED}Gagal mendeteksi interface default. Dibatalkan.${RESET}"
     return 1
   fi
   echo -e "${CYAN}Interface terdeteksi: ${YELLOW}$iface${RESET}"
 
-  echo -e "${CYAN}Mengecek rule iptables untuk ZIVPN...${RESET}"
-  if iptables -t nat -C PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null; then
-    echo -e "${YELLOW}Rule sudah ada. Tidak ditambahkan lagi.${RESET}"
+  echo -e "${CYAN}Membersihkan rule lama (DNAT/REDIRECT) agar tidak dobel...${RESET}"
+
+  # Hapus rule DNAT lama (kalau ada) - dengan / tanpa -i iface
+  while iptables -t nat -C PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null; do
+    iptables -t nat -D PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null || break
+  done
+  while iptables -t nat -C PREROUTING -i "$iface" -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null; do
+    iptables -t nat -D PREROUTING -i "$iface" -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null || break
+  done
+
+  # Hapus rule REDIRECT lama (kalau ada) - dengan / tanpa -i iface
+  while iptables -t nat -C PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT} 2>/dev/null; do
+    iptables -t nat -D PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT} 2>/dev/null || break
+  done
+  while iptables -t nat -C PREROUTING -i "$iface" -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT} 2>/dev/null; do
+    iptables -t nat -D PREROUTING -i "$iface" -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT} 2>/dev/null || break
+  done
+
+  echo -e "${CYAN}Memasang rule yang benar (REDIRECT -> UDP ${ZIVPN_PORT})...${RESET}"
+  iptables -t nat -A PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT}
+
+  echo -e "${CYAN}Memastikan INPUT mengizinkan UDP ${ZIVPN_PORT}...${RESET}"
+  if iptables -C INPUT -p udp --dport ${ZIVPN_PORT} -j ACCEPT 2>/dev/null; then
+    echo -e "${YELLOW}Rule INPUT sudah ada. Lewati.${RESET}"
   else
-    echo -e "${GREEN}Menambahkan rule iptables untuk ZIVPN...${RESET}"
-    iptables -t nat -A PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
+    iptables -A INPUT -p udp --dport ${ZIVPN_PORT} -j ACCEPT
   fi
 
   if command -v ufw >/dev/null 2>&1; then
     echo -e "${CYAN}Mengatur UFW...${RESET}"
-    ufw allow 6000:19999/udp >/dev/null 2>&1 || true
-    ufw allow 5667/udp >/dev/null 2>&1 || true
+    ufw allow ${PORT_FROM}:${PORT_TO}/udp >/dev/null 2>&1 || true
+    ufw allow ${ZIVPN_PORT}/udp >/dev/null 2>&1 || true
   fi
 
   if ! dpkg -s iptables-persistent >/dev/null 2>&1; then
@@ -148,7 +171,7 @@ ensure_zivpn_iptables_persist() {
   iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
   ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
 
-  echo -e "${GREEN}Rule iptables berhasil diterapkan dan disimpan.${RESET}"
+  echo -e "${GREEN}iptables ZIVPN sudah diterapkan (REDIRECT) dan disimpan.${RESET}"
 }
 
 # =========================
@@ -167,13 +190,20 @@ zivpn_uninstall() {
   run_with_spinner "Hapus menu-zivpn" "rm -f /usr/local/bin/menu-zivpn"
   run_with_spinner "Hapus folder config /etc/zivpn" "rm -rf /etc/zivpn"
 
-  local iface
-  iface=$(ip -4 route ls | awk '/default/ {print $5; exit}')
-  if [ -n "$iface" ]; then
-    while iptables -t nat -C PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null; do
-      iptables -t nat -D PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || break
-    done
-  fi
+  # Bersihkan rule NAT ZIVPN (DNAT/REDIRECT) + INPUT accept agar tidak nyangkut
+  local ZIVPN_PORT="5667"
+  local PORT_FROM="6000"
+  local PORT_TO="19999"
+
+  while iptables -t nat -C PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null; do
+    iptables -t nat -D PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j DNAT --to-destination :${ZIVPN_PORT} 2>/dev/null || break
+  done
+  while iptables -t nat -C PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT} 2>/dev/null; do
+    iptables -t nat -D PREROUTING -p udp --dport ${PORT_FROM}:${PORT_TO} -j REDIRECT --to-ports ${ZIVPN_PORT} 2>/dev/null || break
+  done
+  while iptables -C INPUT -p udp --dport ${ZIVPN_PORT} -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p udp --dport ${ZIVPN_PORT} -j ACCEPT 2>/dev/null || break
+  done
 
   mkdir -p /etc/iptables
   iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
@@ -400,36 +430,16 @@ need_root
 
 MODE="${1:-install}"
 case "$MODE" in
-  install)
-    do_install
-    ;;
-  reinstall)
-    do_install
-    ;;
-  uninstall)
-    zivpn_uninstall
-    ;;
-  tools-backup)
-    ins_backup_tools
-    ;;
-  backup)
-    zivpn_make_backup >/dev/null
-    ;;
-  upload)
-    zivpn_upload_backup_rclone "$2" "$3"
-    ;;
-  restore)
-    zivpn_restore_backup "$2"
-    ;;
-  fix-iptables)
-    ensure_zivpn_iptables_persist
-    ;;
-  enable-autorun)
-    setup_autorun_menu_always
-    ;;
-  disable-autorun)
-    disable_autorun_menu
-    ;;
+  install)         do_install ;;
+  reinstall)       do_install ;;
+  uninstall)       zivpn_uninstall ;;
+  tools-backup)    ins_backup_tools ;;
+  backup)          zivpn_make_backup >/dev/null ;;
+  upload)          zivpn_upload_backup_rclone "$2" "$3" ;;
+  restore)         zivpn_restore_backup "$2" ;;
+  fix-iptables)    ensure_zivpn_iptables_persist ;;
+  enable-autorun)  setup_autorun_menu_always ;;
+  disable-autorun) disable_autorun_menu ;;
   *)
     echo -e "${YELLOW}Cara pakai:${RESET}"
     echo -e "  $0 install                   # install (auto reinstall jika sudah ada)"
