@@ -206,18 +206,20 @@ backup_cloud() {
 }
 
 # ==============================
-# RESTORE DARI CLOUD (ZIP)
+# RESTORE DARI CLOUD (ZIP) - CLEAN MODE (PASTE FILENAME)
 # ==============================
 restore_cloud() {
   check_rclone || return
 
   mkdir -p /tmp/zrestore
 
-  echo -e "${CYAN}Daftar backup (.zip) di: ${YELLOW}${RCLONE_REMOTE_DEFAULT}${RESET}"
-  rclone lsf "$RCLONE_REMOTE_DEFAULT" 2>/dev/null | grep -E '\.zip$' | nl
+  echo
+  echo -e "${CYAN}RESTORE BACKUP ZIVPN${RESET}"
+  echo -e "${YELLOW}Paste nama file .zip yang mau direstore${RESET}"
+  echo -e "${YELLOW}Contoh: zivpn-20260214-093905.zip${RESET}"
   echo
 
-  read -p "Nama file backup (contoh: zivpn-YYYYmmdd-HHMMSS.zip): " fname
+  read -p "Nama file backup: " fname
   [ -z "$fname" ] && rm -rf /tmp/zrestore && return
 
   echo -e "${CYAN}Download backup...${RESET}"
