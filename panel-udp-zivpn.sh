@@ -9,6 +9,8 @@ USER_DB="/etc/zivpn/users.db"
 CONF_FILE="/etc/zivpn.conf"
 BACKUP_FILE="/etc/zivpn/config.json.bak"
 
+BACKUP_DIR="/root/backup-zivpn"
+
 RED="\033[1;31m"
 GREEN="\033[1;32m"
 YELLOW="\033[1;33m"
@@ -30,6 +32,46 @@ mkdir -p /etc/zivpn
 [ ! -f "$CONF_FILE" ] && echo 'AUTOCLEAN=OFF' > "$CONF_FILE"
 
 source "$CONF_FILE"
+
+# ==============================
+# BACKUP DATA ZIVPN
+# ==============================
+backup_zivpn() {
+  mkdir -p "$BACKUP_DIR"
+  DATE=$(date +%Y-%m-%d_%H-%M-%S)
+  FILE="$BACKUP_DIR/zivpn-$DATE.tar.gz"
+
+  tar -czf "$FILE" \
+    /etc/zivpn/config.json \
+    /etc/zivpn/users.db \
+    /etc/zivpn/zivpn.crt \
+    /etc/zivpn/zivpn.key \
+    /etc/zivpn.conf 2>/dev/null
+
+  echo -e "${GREEN}Backup berhasil dibuat:${RESET}"
+  echo "$FILE"
+  read -p "Tekan Enter..."
+}
+
+# ==============================
+# RESTORE DATA ZIVPN
+# ==============================
+restore_zivpn() {
+  echo -e "${YELLOW}Masukkan lokasi file backup${RESET}"
+  echo "Contoh: $BACKUP_DIR/zivpn-2026-02-14_12-10-10.tar.gz"
+  read -p "File: " file
+
+  [ ! -f "$file" ] && echo -e "${RED}File tidak ditemukan${RESET}" && sleep 2 && return
+
+  systemctl stop zivpn.service 2>/dev/null
+
+  tar -xzf "$file" -C /
+
+  systemctl restart zivpn.service 2>/dev/null
+
+  echo -e "${GREEN}Restore selesai. Semua akun kembali.${RESET}"
+  read -p "Tekan Enter..."
+}
 
 # ==============================
 # TAMBAH USER
@@ -57,6 +99,7 @@ while true; do
   [[ "$days" == "0" ]] && return
 
   [[ ! "$days" =~ ^[0-9]+$ ]] && echo -e "${RED}Masukkan angka yang valid${RESET}" && continue
+  [[ "$days" -le 0 ]] && echo -e "${RED}Hari harus lebih dari 0${RESET}" && continue
   break
 done
 
@@ -66,7 +109,7 @@ cp "$CONFIG_FILE" "$BACKUP_FILE"
 jq --arg pw "$pass" '.auth.config += [$pw]' "$CONFIG_FILE" > temp && mv temp "$CONFIG_FILE"
 echo "$pass | $exp_date" >> "$USER_DB"
 
-systemctl restart zivpn.service
+systemctl restart zivpn.service 2>/dev/null
 
 echo -e "${GREEN}User berhasil dibuat. Expired: $exp_date${RESET}"
 read -p "Tekan Enter..."
@@ -81,6 +124,7 @@ list_users
 
 read -p "ID user (0 batal): " id
 [[ "$id" == "0" ]] && return
+[[ ! "$id" =~ ^[0-9]+$ ]] && echo -e "${RED}ID harus angka${RESET}" && sleep 2 && return
 
 sel_pass=$(sed -n "${id}p" "$USER_DB" | cut -d'|' -f1 | xargs)
 
@@ -90,7 +134,7 @@ cp "$CONFIG_FILE" "$BACKUP_FILE"
 jq --arg pw "$sel_pass" '.auth.config -= [$pw]' "$CONFIG_FILE" > temp && mv temp "$CONFIG_FILE"
 sed -i "/^$sel_pass[[:space:]]*|/d" "$USER_DB"
 
-systemctl restart zivpn.service
+systemctl restart zivpn.service 2>/dev/null
 
 echo -e "${GREEN}User dihapus${RESET}"
 read -p "Tekan Enter..."
@@ -103,20 +147,24 @@ renew_user() {
 
 list_users
 
-read -p "ID user: " id
+read -p "ID user (0 batal): " id
+[[ "$id" == "0" ]] && return
+[[ ! "$id" =~ ^[0-9]+$ ]] && echo -e "${RED}ID harus angka${RESET}" && sleep 2 && return
+
 sel_pass=$(sed -n "${id}p" "$USER_DB" | cut -d'|' -f1 | xargs)
 
 [[ -z "$sel_pass" ]] && echo -e "${RED}ID tidak valid${RESET}" && sleep 2 && return
 
 read -p "Tambah hari: " days
 [[ ! "$days" =~ ^[0-9]+$ ]] && echo -e "${RED}Input salah${RESET}" && sleep 2 && return
+[[ "$days" -le 0 ]] && echo -e "${RED}Hari harus lebih dari 0${RESET}" && sleep 2 && return
 
 old_exp=$(sed -n "/^$sel_pass[[:space:]]*|/p" "$USER_DB" | cut -d'|' -f2 | xargs)
 new_exp=$(date -d "$old_exp +$days days" +%Y-%m-%d)
 
 sed -i "s/^$sel_pass[[:space:]]*|.*/$sel_pass | $new_exp/" "$USER_DB"
 
-systemctl restart zivpn.service
+systemctl restart zivpn.service 2>/dev/null
 
 echo -e "${GREEN}User diperpanjang sampai $new_exp${RESET}"
 read -p "Tekan Enter..."
@@ -136,6 +184,8 @@ today=$(date +%Y-%m-%d)
 while IFS='|' read -r pass exp; do
   pass=$(echo "$pass" | xargs)
   exp=$(echo "$exp" | xargs)
+
+  [[ -z "$pass" ]] && continue
 
   if [[ "$exp" < "$today" ]]; then
     status="EXPIRED"
@@ -158,18 +208,23 @@ clean_expired_users() {
 today=$(date +%Y-%m-%d)
 cp "$CONFIG_FILE" "$BACKUP_FILE"
 
+# pakai file sementara supaya tidak merusak while read (karena sed mengubah file saat dibaca)
+tmp_db=$(mktemp)
+cp "$USER_DB" "$tmp_db"
+
 while IFS='|' read -r pass exp; do
   pass=$(echo "$pass" | xargs)
   exp=$(echo "$exp" | xargs)
+  [[ -z "$pass" ]] && continue
 
   if [[ "$exp" < "$today" ]]; then
     jq --arg pw "$pass" '.auth.config -= [$pw]' "$CONFIG_FILE" > temp && mv temp "$CONFIG_FILE"
     sed -i "/^$pass[[:space:]]*|/d" "$USER_DB"
-    echo "Hapus user expired: $pass"
   fi
-done < "$USER_DB"
+done < "$tmp_db"
 
-systemctl restart zivpn.service
+rm -f "$tmp_db"
+systemctl restart zivpn.service 2>/dev/null
 }
 
 toggle_autoclean() {
@@ -185,9 +240,9 @@ toggle_autoclean() {
 # ==============================
 # SERVICE CONTROL
 # ==============================
-start_service(){ systemctl start zivpn.service; }
-stop_service(){ systemctl stop zivpn.service; }
-restart_service(){ systemctl restart zivpn.service; }
+start_service(){ systemctl start zivpn.service 2>/dev/null; }
+stop_service(){ systemctl stop zivpn.service 2>/dev/null; }
+restart_service(){ systemctl restart zivpn.service 2>/dev/null; }
 
 # ==============================
 # MENU
@@ -209,6 +264,7 @@ echo "OS         : $OS"
 echo "Arsitektur : $ARCH"
 echo "Port       : 5667"
 echo "Range UDP  : 6000-19999"
+echo "Folder Backup : $BACKUP_DIR"
 echo -e "${CYAN}=========================================${RESET}"
 echo "1. Tambah User"
 echo "2. Hapus User"
@@ -218,7 +274,9 @@ echo "5. Start Service"
 echo "6. Restart Service"
 echo "7. Stop Service"
 echo "8. Auto Hapus User Expired [$AUTOCLEAN]"
-echo "9. Keluar"
+echo "9. Backup User"
+echo "10. Restore User"
+echo "0. Keluar"
 echo -e "${CYAN}=========================================${RESET}"
 
 read -p "Pilih menu: " opc
@@ -232,7 +290,9 @@ case $opc in
 6) restart_service;;
 7) stop_service;;
 8) toggle_autoclean;;
-9) exit;;
+9) backup_zivpn;;
+10) restore_zivpn;;
+0) exit;;
 *) echo "Pilihan salah"; sleep 1;;
 esac
 
