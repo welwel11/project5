@@ -1,0 +1,84 @@
+#!/bin/bash
+set -e
+
+echo "== ZIVPN UDP Installer (Minimal) =="
+
+# Cek sudah terpasang
+if command -v zivpn >/dev/null 2>&1; then
+  echo "ZIVPN UDP sudah terpasang"
+  read -rp "Tekan ENTER untuk kembali..."
+  exit 0
+fi
+
+# ===============================
+# DEPENDENCY (SMART CHECK)
+# ===============================
+need_install=()
+
+for pkg in wget curl openssl; do
+  dpkg -s "$pkg" &>/dev/null || need_install+=("$pkg")
+done
+
+if [ "${#need_install[@]}" -ne 0 ]; then
+  echo "Menginstall dependency: ${need_install[*]}"
+  apt update -y
+  apt install -y "${need_install[@]}"
+else
+  echo "Semua dependency sudah terpasang, skip..."
+fi
+
+# ===============================
+# DOWNLOAD ZIVPN
+# ===============================
+wget -q https://github.com/ChristopherAGT/zivpn-tunnel-udp/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64 \
+  -O /usr/local/bin/zivpn
+chmod +x /usr/local/bin/zivpn
+
+# ===============================
+# CONFIG
+# ===============================
+mkdir -p /etc/zivpn
+wget -q https://raw.githubusercontent.com/welwel11/project3/main/config.json \
+  -O /etc/zivpn/config.json
+
+# ===============================
+# SSL SELF-SIGNED
+# ===============================
+openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
+  -subj "/CN=zivpn-udp" \
+  -keyout /etc/zivpn/zivpn.key \
+  -out /etc/zivpn/zivpn.crt
+
+# ===============================
+# SYSTEMD SERVICE
+# ===============================
+cat >/etc/systemd/system/zivpn.service <<EOF
+[Unit]
+Description=ZIVPN UDP Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zivpn server -c /etc/zivpn/config.json
+Restart=always
+RestartSec=3
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now zivpn
+
+# ===============================
+# DONE
+# ===============================
+echo ""
+echo "======================================"
+echo " ZIVPN UDP BERHASIL DIPASANG"
+echo " Service : systemctl status zivpn"
+echo "======================================"
+echo ""
+read -rp "Tekan ENTER untuk kembali ke menu..."
