@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================
-# ZIVPN - PANEL USER UDP (RCLONE ZIP BACKUP + AUTO FIX CONF)
+# ZIVPN - PANEL USER UDP (RCLONE ZIP BACKUP + AUTOCLEAN TOGGLE)
 # ==============================
 
 CONFIG_FILE="/etc/zivpn/config.json"
@@ -32,6 +32,7 @@ mkdir -p /etc/zivpn
 [ ! -f "$CONF_FILE" ] && echo 'AUTOCLEAN=OFF' > "$CONF_FILE"
 
 source "$CONF_FILE" 2>/dev/null || true
+[ -z "$AUTOCLEAN" ] && AUTOCLEAN="OFF"
 
 # ==============================
 # HELPERS
@@ -41,21 +42,15 @@ pause(){ read -p "Enter..."; }
 # Fix rclone.conf yang pakai ":" (YAML-like) jadi " = " (INI)
 fix_rclone_conf_format() {
   [ ! -f "$RCLONE_CONF" ] && return 1
-
-  # hanya ubah key yang umum dipakai rclone, biar aman
-  # contoh: type: drive  -> type = drive
-  #         scope: drive -> scope = drive
-  #         token: {...} -> token = {...}
   sed -i -E \
     -e 's/^[[:space:]]*(type|scope|token|client_id|client_secret|service_account_file|team_drive|root_folder_id)[[:space:]]*:[[:space:]]*/\1 = /' \
     "$RCLONE_CONF" 2>/dev/null || true
-
   return 0
 }
 
 # Auto-detect remote dari rclone.conf (prioritas: dr -> gdrive -> remote pertama)
 detect_rclone_remote() {
-  local remotes
+  local remotes first
   remotes=$(rclone listremotes 2>/dev/null | tr -d '\r')
 
   if echo "$remotes" | grep -q "^dr:$"; then
@@ -68,8 +63,6 @@ detect_rclone_remote() {
     return 0
   fi
 
-  # fallback: pakai remote pertama jika ada
-  local first
   first=$(echo "$remotes" | head -n1)
   if [ -n "$first" ]; then
     RCLONE_REMOTE_DEFAULT="${first}zivpn-backup"
@@ -80,48 +73,32 @@ detect_rclone_remote() {
 }
 
 ensure_remote_folder() {
-  # bikin folder di root remote jika belum ada
-  # rclone mkdir aman walau folder sudah ada
   rclone mkdir "$RCLONE_REMOTE_DEFAULT" >/dev/null 2>&1 || true
-}
-
-# ==============================
-# INSTALL RCLONE + ZIP
-# ==============================
-install_rclone() {
-  apt update -y >/dev/null 2>&1
-  apt install -y rclone zip >/dev/null 2>&1
-  mkdir -p /root/.config/rclone
-  echo -e "${GREEN}rclone + zip berhasil diinstall${RESET}"
-  echo -e "${YELLOW}Sekarang jalankan perintah: rclone config${RESET}"
-  pause
 }
 
 check_rclone() {
   if ! command -v rclone >/dev/null 2>&1; then
     echo -e "${RED}rclone belum terinstall!${RESET}"
-    echo "Pilih menu: Install rclone + zip"
+    echo -e "${YELLOW}Install:${RESET} apt update -y && apt install -y rclone zip"
     pause
     return 1
   fi
 
   if [ ! -f "$RCLONE_CONF" ]; then
     echo -e "${RED}rclone.conf tidak ditemukan!${RESET}"
-    echo "Buat dulu dengan: rclone config"
+    echo -e "${YELLOW}Buat dulu dengan:${RESET} rclone config"
     pause
     return 1
   fi
 
   # test baca config / remote
   if ! rclone listremotes >/dev/null 2>&1; then
-    # kalau error karena format ":", coba auto-fix sekali
     if rclone listremotes 2>&1 | grep -qi "didn't find section"; then
       echo -e "${YELLOW}Format rclone.conf terdeteksi salah (pakai ':'). Memperbaiki...${RESET}"
       fix_rclone_conf_format
     fi
   fi
 
-  # test ulang
   if ! rclone listremotes >/dev/null 2>&1; then
     echo -e "${RED}rclone masih error membaca config.${RESET}"
     echo -e "${YELLOW}Cek file:${RESET} $RCLONE_CONF"
@@ -129,7 +106,6 @@ check_rclone() {
     return 1
   fi
 
-  # auto-detect remote (dr:, gdrive:, dsb)
   if ! detect_rclone_remote; then
     echo -e "${RED}Tidak ada remote rclone yang terdeteksi.${RESET}"
     echo -e "${YELLOW}Jalankan:${RESET} rclone config"
@@ -142,16 +118,69 @@ check_rclone() {
 }
 
 # ==============================
-# BACKUP KE CLOUD (ZIP)
+# AUTO CLEAN EXPIRED (hapus dari config + db)
+# ==============================
+clean_expired_users() {
+  [ "$AUTOCLEAN" != "ON" ] && return
+
+  [ ! -f "$USER_DB" ] && return
+  [ ! -f "$CONFIG_FILE" ] && return
+
+  local today tmpdb pass exp changed=0
+  today=$(date +%Y-%m-%d)
+  tmpdb="/tmp/zivpn_users.$$"
+  > "$tmpdb"
+
+  while IFS='|' read -r pass exp; do
+    pass=$(echo "$pass" | xargs)
+    exp=$(echo "$exp" | xargs)
+    [ -z "$pass" ] && continue
+
+    if [[ "$exp" < "$today" ]]; then
+      # hapus password dari config.json
+      jq --arg pw "$pass" '.auth.config -= [$pw]' "$CONFIG_FILE" > /tmp/zivpn.tmp && mv /tmp/zivpn.tmp "$CONFIG_FILE"
+      changed=1
+      continue
+    fi
+
+    echo "$pass | $exp" >> "$tmpdb"
+  done < "$USER_DB"
+
+  mv "$tmpdb" "$USER_DB"
+  if [ "$changed" = "1" ]; then
+    systemctl restart zivpn.service 2>/dev/null || true
+  fi
+}
+
+toggle_autoclean() {
+  # pastikan file ada + format konsisten
+  grep -q "^AUTOCLEAN=" "$CONF_FILE" 2>/dev/null || echo "AUTOCLEAN=OFF" >> "$CONF_FILE"
+
+  if grep -q "^AUTOCLEAN=ON" "$CONF_FILE"; then
+    sed -i 's/^AUTOCLEAN=ON/AUTOCLEAN=OFF/' "$CONF_FILE"
+    AUTOCLEAN="OFF"
+    echo -e "${YELLOW}Auto hapus akun expired DIMATIKAN${RESET}"
+  else
+    sed -i 's/^AUTOCLEAN=OFF/AUTOCLEAN=ON/' "$CONF_FILE"
+    AUTOCLEAN="ON"
+    echo -e "${GREEN}Auto hapus akun expired DIAKTIFKAN${RESET}"
+  fi
+
+  source "$CONF_FILE" 2>/dev/null || true
+  pause
+}
+
+# ==============================
+# BACKUP KE CLOUD (ZIP) - ZIVPN SAJA
 # ==============================
 backup_cloud() {
+  clean_expired_users
   check_rclone || return
 
   local TS FILE
   TS="$(date +%Y%m%d-%H%M%S)"
   FILE="/tmp/zivpn-${TS}.zip"
 
-  # bikin ZIP dari root supaya path tetap benar saat restore
   (cd / && zip -q -r "$FILE" \
     etc/zivpn/config.json \
     etc/zivpn/users.db \
@@ -206,7 +235,6 @@ restore_cloud() {
     return
   fi
 
-  # backup cepat sebelum restore (rollback)
   local BAK="/tmp/zivpn-before-restore-$(date +%Y%m%d-%H%M%S).zip"
   (cd / && zip -q -r "$BAK" etc/zivpn etc/zivpn.conf 2>/dev/null) || true
   echo -e "${YELLOW}Backup sebelum restore disimpan: $BAK${RESET}"
@@ -222,6 +250,9 @@ restore_cloud() {
     return
   fi
 
+  source "$CONF_FILE" 2>/dev/null || true
+  [ -z "$AUTOCLEAN" ] && AUTOCLEAN="OFF"
+
   systemctl daemon-reload 2>/dev/null || true
   systemctl restart zivpn.service 2>/dev/null || true
 
@@ -234,12 +265,12 @@ restore_cloud() {
 # USER MANAGEMENT
 # ==============================
 add_user() {
+  clean_expired_users
   echo -e "${CYAN}Buat akun baru${RESET}"
 
   read -p "Password : " pass
   [[ -z "$pass" ]] && echo "Kosong!" && pause && return
 
-  # cegah duplikat password
   if jq -e --arg pw "$pass" '.auth.config | index($pw)' "$CONFIG_FILE" >/dev/null 2>&1; then
     echo -e "${RED}Password sudah ada${RESET}"
     pause
@@ -249,6 +280,7 @@ add_user() {
   read -p "Masa aktif (hari): " days
   [[ ! "$days" =~ ^[0-9]+$ ]] && echo -e "${RED}Hari harus angka${RESET}" && pause && return
 
+  local exp_date
   exp_date=$(date -d "+$days days" +%Y-%m-%d)
 
   jq --arg pw "$pass" '.auth.config += [$pw]' "$CONFIG_FILE" > /tmp/zivpn.tmp && mv /tmp/zivpn.tmp "$CONFIG_FILE"
@@ -260,11 +292,11 @@ add_user() {
 }
 
 list_users() {
+  clean_expired_users
   echo
   printf "%-4s %-20s %-12s %-10s\n" "ID" "PASSWORD" "EXPIRED" "STATUS"
 
-  local i=1
-  local today
+  local i=1 today
   today=$(date +%Y-%m-%d)
 
   while IFS='|' read -r pass exp; do
@@ -282,6 +314,7 @@ list_users() {
 }
 
 remove_user() {
+  clean_expired_users
   list_users
   read -p "ID: " id
   [[ ! "$id" =~ ^[0-9]+$ ]] && echo -e "${RED}ID harus angka${RESET}" && sleep 1 && return
@@ -298,6 +331,9 @@ remove_user() {
   sleep 1
 }
 
+# Jalankan sekali saat start menu (kalau AUTOCLEAN=ON)
+clean_expired_users
+
 # ==============================
 # MENU
 # ==============================
@@ -308,18 +344,17 @@ while true; do
   echo "==============================="
   echo "        PANEL ZIVPN UDP"
   echo "==============================="
-  echo "IP VPS : ${IP:-N/A}"
-  echo "Port   : 5667"
-  echo "Range  : 6000-19999"
-  echo "Cloud  : $RCLONE_REMOTE_DEFAULT"
+  echo "IP VPS     : ${IP:-N/A}"
+  echo "Port       : 5667"
+  echo "Range      : 6000-19999"
+  echo "AutoClean  : $AUTOCLEAN"
   echo "==============================="
   echo "1. Tambah User"
   echo "2. Hapus User"
   echo "3. List User"
-  echo "4. Install rclone + zip"
-  echo "5. Backup ke Cloud (ZIP)"
-  echo "6. Restore dari Cloud (ZIP)"
-  echo "7. Fix rclone.conf (':' -> '=')"
+  echo "4. Backup"
+  echo "5. Restore"
+  echo "6. Toggle Auto Hapus Expired"
   echo "0. Keluar"
   echo "==============================="
 
@@ -329,10 +364,9 @@ while true; do
     1) add_user;;
     2) remove_user;;
     3) list_users; pause;;
-    4) install_rclone;;
-    5) backup_cloud;;
-    6) restore_cloud;;
-    7) fix_rclone_conf_format; echo -e "${GREEN}Selesai memperbaiki format rclone.conf${RESET}"; pause;;
+    4) backup_cloud;;
+    5) restore_cloud;;
+    6) toggle_autoclean;;
     0) exit;;
     *) echo "Pilihan salah"; sleep 1;;
   esac
